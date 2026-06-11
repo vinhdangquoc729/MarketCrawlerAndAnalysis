@@ -430,9 +430,9 @@ def start_update_pipeline(last_market_date) -> None:
 
     steps: list[tuple[str, list[str]]] = [
         ("Crawl tin tức mới",        ["src.jobs.crawl_backfill", "--timeline-pages", "6", "--max-per-category", "100"]),
+        ("Lọc bài liên quan",        ["src.jobs.run_relevance_filter"]),
         ("Gắn thực thể bài báo",     ["src.jobs.build_article_entities", "--since-date", market_start, "--vn30-only", "--workers", "10"]),
         ("Phân tích khía cạnh",      ["src.jobs.build_entity_aspects"]),
-        ("Lọc bài liên quan",        ["src.jobs.run_relevance_filter"]),
         ("Chạy inference",           ["src.jobs.run_model_inference"]
                                      + (["--local-model-path", os.getenv("SENTIMENT_MODEL_PATH")]
                                         if os.getenv("SENTIMENT_MODEL_PATH") else [])),
@@ -595,7 +595,6 @@ with st.sidebar:
 
     if st.button("♻️ Refresh cache", width="stretch"):
         st.cache_data.clear()
-        st.cache_resource.clear()
         st.rerun()
 
     st.divider()
