@@ -113,69 +113,45 @@ def load_daily_sentiment() -> pd.DataFrame:
 
 @st.cache_data(ttl=120)
 def load_evidence(ticker: str | None = None, limit: int = 200) -> pd.DataFrame:
-    if not table_exists("sentiment_evidence_view"):
-        return pd.DataFrame()
-
+    ticker_filter = "AND ae.ticker = :ticker" if ticker and ticker != "ALL" else ""
+    params: dict = {"limit": limit}
     if ticker and ticker != "ALL":
-        return read_sql(
-            """
-            SELECT
-                title,
-                url,
-                category,
-                published_at_vn,
-                ticker,
-                company_name,
-                sector,
-                entity_text,
-                aspect,
-                aspect_keywords,
-                aspect_score,
-                sentiment_label,
-                sentiment_score,
-                confidence,
-                prob_negative,
-                prob_neutral,
-                prob_positive,
-                context,
-                model_version,
-                created_at
-            FROM sentiment_evidence_view
-            WHERE ticker = :ticker
-            ORDER BY created_at DESC
-            LIMIT :limit
-            """,
-            {"ticker": ticker, "limit": limit},
-        )
+        params["ticker"] = ticker
 
     return read_sql(
-        """
+        f"""
         SELECT
-            title,
-            url,
-            category,
-            published_at_vn,
-            ticker,
-            company_name,
-            sector,
-            entity_text,
-            aspect,
-            aspect_keywords,
-            aspect_score,
-            sentiment_label,
-            sentiment_score,
-            confidence,
-            prob_negative,
-            prob_neutral,
-            prob_positive,
-            context,
-            model_version,
-            created_at
-        FROM sentiment_evidence_view
-        ORDER BY created_at DESC
+            a.title,
+            a.url,
+            a.category,
+            a.published_at AT TIME ZONE 'Asia/Ho_Chi_Minh' AS published_at_vn,
+            ae.ticker,
+            tm.company_name,
+            tm.sector,
+            ae.entity_text,
+            ae.context,
+            ea.aspect,
+            ea.aspect_keywords,
+            ea.aspect_score,
+            es.sentiment_label,
+            es.sentiment_score,
+            es.confidence,
+            es.prob_negative,
+            es.prob_neutral,
+            es.prob_positive,
+            es.model_version,
+            es.created_at
+        FROM entity_sentiments es
+        JOIN entity_aspects ea ON es.entity_aspect_id = ea.id
+        JOIN article_entities ae ON ea.entity_id = ae.id
+        JOIN articles a ON ae.article_id = a.article_id
+        LEFT JOIN ticker_master tm ON ae.ticker = tm.ticker
+        WHERE es.inference_status = 'success'
+          {ticker_filter}
+        ORDER BY es.created_at DESC
         LIMIT :limit
         """,
-        {"limit": limit},
+        params,
     )
 
 
