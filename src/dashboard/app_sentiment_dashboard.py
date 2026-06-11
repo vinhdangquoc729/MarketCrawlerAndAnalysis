@@ -276,28 +276,57 @@ def load_news(
 
     where = ("WHERE " + " AND ".join(filters)) if filters else ""
 
+    # matched_articles: articles passing the filter (ticker/sentiment/date).
+    # dominant: highest-confidence entity per matched article (for the sentiment badge).
+    # Main query: joins back ALL article_entities (no filter) to collect every ticker
+    # mentioned in the article via STRING_AGG, regardless of which ticker was filtered.
     base_sql = f"""
-        SELECT * FROM (
-            SELECT DISTINCT ON (a.article_id)
-                a.article_id,
-                a.title,
-                a.url,
-                a.category,
-                a.published_at AT TIME ZONE 'Asia/Ho_Chi_Minh' AS published_at_vn,
-                ae.ticker,
-                es.sentiment_label,
-                ROUND(es.sentiment_score::numeric, 3) AS sentiment_score,
-                ROUND(es.confidence::numeric, 3) AS confidence,
-                ROUND(es.prob_positive::numeric, 3) AS prob_positive,
-                ROUND(es.prob_neutral::numeric, 3) AS prob_neutral,
-                ROUND(es.prob_negative::numeric, 3) AS prob_negative
+        WITH matched_articles AS (
+            SELECT DISTINCT a.article_id
             FROM articles a
             JOIN article_entities ae ON a.article_id = ae.article_id
             JOIN entity_aspects ea ON ae.id = ea.entity_id
             JOIN entity_sentiments es ON ea.id = es.entity_aspect_id
             {where}
-            ORDER BY a.article_id, es.confidence DESC
-        ) sub
+        ),
+        dominant AS (
+            SELECT DISTINCT ON (ae.article_id)
+                ae.article_id,
+                ae.ticker AS dominant_ticker,
+                es.sentiment_label,
+                es.sentiment_score,
+                es.confidence,
+                es.prob_positive,
+                es.prob_neutral,
+                es.prob_negative
+            FROM article_entities ae
+            JOIN entity_aspects ea ON ae.id = ea.entity_id
+            JOIN entity_sentiments es ON ea.id = es.entity_aspect_id
+            WHERE ae.article_id IN (SELECT article_id FROM matched_articles)
+            ORDER BY ae.article_id, es.confidence DESC
+        )
+        SELECT
+            a.article_id,
+            a.title,
+            a.url,
+            a.category,
+            a.published_at AT TIME ZONE 'Asia/Ho_Chi_Minh' AS published_at_vn,
+            STRING_AGG(DISTINCT ae_all.ticker, ', ' ORDER BY ae_all.ticker) AS tickers,
+            d.dominant_ticker AS ticker,
+            d.sentiment_label,
+            ROUND(d.sentiment_score::numeric, 3) AS sentiment_score,
+            ROUND(d.confidence::numeric, 3) AS confidence,
+            ROUND(d.prob_positive::numeric, 3) AS prob_positive,
+            ROUND(d.prob_neutral::numeric, 3) AS prob_neutral,
+            ROUND(d.prob_negative::numeric, 3) AS prob_negative
+        FROM matched_articles ma
+        JOIN articles a ON a.article_id = ma.article_id
+        JOIN article_entities ae_all ON ae_all.article_id = a.article_id
+        JOIN dominant d ON d.article_id = a.article_id
+        GROUP BY
+            a.article_id, a.title, a.url, a.category, a.published_at,
+            d.dominant_ticker, d.sentiment_label, d.sentiment_score, d.confidence,
+            d.prob_positive, d.prob_neutral, d.prob_negative
         ORDER BY published_at_vn DESC
     """
 
@@ -1125,7 +1154,8 @@ with tab_news:
         for _, row in news_df.iterrows():
             label = str(row.get("sentiment_label", "neutral"))
             badge = sentiment_badge(label)
-            ticker_val = row.get("ticker", "")
+            tickers_val = row.get("tickers", "") or row.get("ticker", "")
+            dominant_ticker = row.get("ticker", "")
             conf = row.get("confidence", None)
             score = row.get("sentiment_score", None)
             pub = row.get("published_at_vn", "")
@@ -1136,14 +1166,14 @@ with tab_news:
             pub_str = pd.to_datetime(pub).strftime("%Y-%m-%d %H:%M") if pd.notna(pub) else "-"
             display_title = title if len(title) <= 80 else title[:77] + "..."
             with st.expander(
-                f"{pub_str}  |  {ticker_val}  |  {badge}  |  conf={format_score(conf)}  |  {display_title}"
+                f"{pub_str}  |  {tickers_val}  |  {badge}({dominant_ticker})  |  conf={format_score(conf)}  |  {display_title}"
             ):
                 if url:
                     st.markdown(f"**[{title}]({url})**")
                 else:
                     st.markdown(f"**{title}**")
 
-                st.caption(f"Danh mục: {category} · {pub_str}")
+                st.caption(f"Danh mục: {category} · {pub_str} · Sentiment của: **{dominant_ticker}**")
 
                 pcols = st.columns(3)
                 pcols[0].metric("P(positive)", format_score(row.get("prob_positive")))
