@@ -1,19 +1,46 @@
-# Market Sentiment Demo - End-to-End
+# Market Sentiment — End-to-End (VN30)
 
-Project demo xây hệ thống Market Sentiment cho thị trường tài chính Việt Nam.
+Hệ thống thu thập tin tức tài chính Việt Nam, phân tích sentiment bằng PhoBERT finetuned, và kiểm định mối quan hệ giữa sentiment với biến động giá cổ phiếu VN30.
 
-```text
-CafeF news
-→ crawl bài viết (category feed hoặc ticker-specific events)
-→ lưu PostgreSQL
-→ relevance filter (rule-based scoring)
-→ entity linking theo mã cổ phiếu
-→ aspect extraction
-→ sentiment inference (local PhoBERT hoặc FastAPI)
-→ aggregate sentiment theo mã/ngày
-→ lấy dữ liệu giá thị trường
-→ kiểm định tương quan sentiment với biến thị trường
-→ dashboard
+```
+CafeF news / corporate events
+  → crawl & parse bài viết
+  → PostgreSQL
+  → relevance filter (rule-based)
+  → entity linking (mã cổ phiếu)
+  → aspect extraction
+  → sentiment inference (PhoBERT finetuned, local)
+  → aggregate sentiment theo mã / ngày
+  → fetch giá thị trường (vnstock)
+  → build market features (log_return, volume_growth, ...)
+  → export daily panel CSV
+  → analysis (cross-correlation, Granger, VAR, event study, ML)
+  → dashboard (Streamlit)
+```
+
+---
+
+## Cấu trúc thư mục
+
+```
+src/
+├── crawlers/          # CafeF HTML crawler + parser + events crawler
+├── jobs/              # Entry-point scripts cho từng bước pipeline
+├── nlp/               # Entity linker, aspect extractor, sentiment input builder
+├── inference/         # LocalSentimentModel (PhoBERT) + HTTP client
+├── market_data/       # vnstock provider, market feature builder
+├── master_data/       # Ticker master, alias builder
+├── storage/           # DB layer (SQLAlchemy + psycopg2)
+├── preprocessing/     # Relevance filter, text cleaner
+├── analysis/          # Cross-corr, Granger, VAR, event study, ML, analog forecast
+├── dashboard/         # Streamlit app
+├── validation/        # QA queries
+└── label/             # PhoBERT finetuning scripts
+models/                # Finetuned PhoBERT checkpoints (không push git, gửi Drive)
+data/                  # Panel CSV, results (không push git)
+docker-compose.yml     # PostgreSQL container
+requirements.txt
+.env.example
 ```
 
 ---
@@ -33,17 +60,16 @@ pip install -r requirements.txt
 
 ---
 
-## 2. Cấu hình môi trường
+## 2. Cấu hình `.env`
 
 ```bash
-# Linux/macOS
-cp .env.example .env
-
-# Windows PowerShell
+# Windows
 copy .env.example .env
+# macOS/Linux
+cp .env.example .env
 ```
 
-Chỉnh `.env` theo môi trường:
+Chỉnh `.env`:
 
 ```env
 DB_HOST=127.0.0.1
@@ -51,9 +77,10 @@ DB_PORT=5434
 DB_NAME=market_sentiment
 DB_USER=postgres
 DB_PASSWORD=postgres
+DB_TIMEZONE=Asia/Ho_Chi_Minh
 
-# Local model (không cần API server)
-SENTIMENT_MODEL_PATH=../stock_news/models/finetuned_last_layer_vn30_content
+# Đường dẫn đến thư mục model finetuneds
+SENTIMENT_MODEL_PATH=models/finetuned_last_layer_vn30_content
 ```
 
 ---
@@ -64,7 +91,7 @@ SENTIMENT_MODEL_PATH=../stock_news/models/finetuned_last_layer_vn30_content
 docker compose up -d
 ```
 
-> **Windows:** nếu port 5432/5433 đã bị local PostgreSQL chiếm, đổi mapping trong `docker-compose.yml` và `DB_PORT` trong `.env`.
+> **Windows:** nếu port 5432/5433 đã bị local PostgreSQL chiếm, đổi port mapping trong `docker-compose.yml` và `DB_PORT` trong `.env`.
 
 ---
 
@@ -82,62 +109,44 @@ python -m src.master_data.aliases_builder
 
 ### 5a. Category feed (tin tức theo chuyên mục)
 
-Crawl tất cả chuyên mục, chỉ lấy bài từ 2024 trở đi:
-
 ```bash
+# Backfill từ 2024
 python -m src.jobs.crawl_backfill --max-per-category 200 --timeline-pages 10
+
+# Song song, không giới hạn
+python -m src.jobs.crawl_backfill --min-year 2024 --timeline-pages 2000 --workers 50
 ```
 
-Tùy chọn:
-
-```bash
-# Chỉ crawl một chuyên mục
-python -m src.jobs.crawl_backfill --category doanh_nghiep --max-per-category 200
-
-# Crawl song song với nhiều thread (mặc định 10, khuyến nghị 30–50 khi backfill lớn)
-python -m src.jobs.crawl_backfill --category doanh_nghiep --max-per-category 999999 \
-  --timeline-pages 2000 --workers 50
-
-# Mở rộng phạm vi năm
-python -m src.jobs.crawl_backfill --min-year 2023 --timeline-pages 20
-
-# Không giới hạn năm
-python -m src.jobs.crawl_backfill --min-year 0
-```
-
-Các chuyên mục có sẵn: `thi_truong_chung_khoan`, `doanh_nghiep`, `ngan_hang`, `bao_cao_phan_tich`.
+Chuyên mục có sẵn: `thi_truong_chung_khoan`, `doanh_nghiep`, `ngan_hang`, `bao_cao_phan_tich`.
 
 ### 5b. Corporate events theo mã cổ phiếu
-
-Crawl tin tức sự kiện doanh nghiệp từ CafeF Events API, `detected_tickers` được gán sẵn:
 
 ```bash
 # VN30 (mặc định)
 python -m src.jobs.crawl_corporate_events
 
-# Danh sách mã chỉ định
+# Mã chỉ định
 python -m src.jobs.crawl_corporate_events --tickers FPT,VCB,HPG --min-year 2024
-
-# Toàn bộ mã từ ticker_master
-python -m src.jobs.crawl_corporate_events --from-ticker-master --max-pages 5
 ```
 
 ---
 
 ## 6. Relevance filter
 
-Phân loại bài thành `process_sentiment`, `review_later`, `skip_sentiment` bằng rule-based scoring:
-
 ```bash
 python -m src.jobs.run_relevance_filter
 ```
+
+Phân loại bài thành `process_sentiment`, `review_later`, `skip_sentiment` bằng rule-based keyword scoring.
 
 ---
 
 ## 7. Entity linking & aspect extraction
 
 ```bash
-python -m src.jobs.build_article_entities
+# Chỉ VN30, 4 workers song song
+python -m src.jobs.build_article_entities --vn30-only --workers 4
+
 python -m src.jobs.build_entity_aspects
 ```
 
@@ -145,24 +154,14 @@ python -m src.jobs.build_entity_aspects
 
 ## 8. Sentiment inference
 
-### Local model (khuyến nghị — không cần server)
-
-Cần đặt `SENTIMENT_MODEL_PATH` trong `.env`, hoặc truyền trực tiếp:
+Model: **PhoBERT finetuned** (`wonrax/phobert-base-vietnamese-sentiment`, finetuned last encoder layer + classifier head trên dữ liệu VN30 với format `[STOCK]...[/STOCK][TEXT]...[/TEXT]`).
 
 ```bash
 python -m src.jobs.run_model_inference \
-  --local-model-path ../stock_news/models/finetuned_last_layer_vn30_content
+  --local-model-path models/finetuned_last_layer_vn30_content
 ```
 
-Model là PhoBERT finetuned (`wonrax/phobert-base-vietnamese-sentiment`), output gồm `prob_negative`, `prob_neutral`, `prob_positive` cho từng entity-aspect.
-
-### FastAPI server (tùy chọn)
-
-Nếu có API server, đặt `SENTIMENT_MODEL_API_URL` trong `.env` và để `SENTIMENT_MODEL_PATH` trống:
-
-```bash
-python -m src.jobs.run_model_inference --model-version finetuned-v1
-```
+Output: `prob_negative`, `prob_neutral`, `prob_positive` cho từng entity-aspect pair.
 
 ---
 
@@ -177,155 +176,130 @@ python -m src.jobs.build_sentiment_aggregates
 ## 10. Market data
 
 ```bash
-# Fetch giá lịch sử
-python -m src.jobs.fetch_market_data --start-date 2025-01-01 --tickers FPT,VCB,HPG
+# Fetch giá lịch sử (delay 4s/request để tránh rate limit vnstock)
+python -m src.jobs.fetch_market_data --start-date 2024-01-01 --delay-seconds 4
 
-# Tính biến thị trường (return, volatility, ...)
+# Tính market features (log_return, volume_growth, CLV, ...)
 python -m src.jobs.build_market_features
-
-# Kiểm định tương quan sentiment vs giá
-python -m src.jobs.run_market_validation_pipeline \
-  --start-date 2025-01-01 --tickers FPT,VCB,HPG
 ```
 
 ---
 
-## 11. Export daily panel CSV
-
-Xuất CSV phẳng từ PostgreSQL để dùng cho các analysis script:
+## 11. Export daily panel
 
 ```bash
-# Toàn bộ dữ liệu
+# Xuất CSV phẳng từ PostgreSQL
 python -m src.jobs.export_daily_panel
 
-# Lọc theo ngày và mã
-python -m src.jobs.export_daily_panel --start-date 2025-01-01 --tickers FPT,VCB,HPG
-
-# Chỉ định đường dẫn output
-python -m src.jobs.export_daily_panel --output data/my_panel.csv
+# Lọc theo ngày / mã
+python -m src.jobs.export_daily_panel --start-date 2024-01-01 --tickers FPT,VCB,HPG
 ```
 
-Output CSV có các cột: `date`, `ticker`, `sector`, `sentiment_score`, `news_count`, `log_return`, `volume_growth`, `clv`, `return_1d`, `forward_return_1d`, `target_up`, ... (PostgreSQL là nguồn lưu trữ chính, CSV chỉ là artifact tạm thời cho analysis).
+Cột output: `date`, `ticker`, `sector`, `sentiment_score`, `news_count`, `log_return`, `volume_growth`, `clv`, `target_up`, ...
 
 ---
 
 ## 12. Analysis
 
-Sau khi export panel CSV, chạy các analysis script trong `src/analysis/`. Tất cả đều nhận `--panel` (mặc định `data/processed/validation/daily_panel.csv`) và ghi kết quả vào `data/results/`.
-
-### Cross-correlations (sentiment vs trading metrics)
+Tất cả script nhận `--panel` (default `data/processed/validation/daily_panel.csv`) và ghi kết quả vào `data/results/`.
 
 ```bash
+# Cross-correlations (sentiment vs return/volume theo lag)
 python -m src.analysis.cross_correlations
-python -m src.analysis.cross_correlations --news-days-only --ccf-output data/results/ccf_news_days.csv
-```
 
-### Granger causality
-
-```bash
-# OLS Granger F-test
+# Granger causality OLS F-test
 python -m src.analysis.granger_sentiment
 
 # VAR-based Granger
 python -m src.analysis.var_granger_sentiment
-```
 
-### Binary confusion: sentiment direction vs stock direction
+# Binary confusion: sentiment direction vs stock direction
+python -m src.analysis.sentiment_target_confusion --lags -5 -4 -3 -2 -1 0 1 2 3 4 5
 
-```bash
-python -m src.analysis.sentiment_target_confusion --lags 0 1 2 3 4 5
-```
+# Event study: abnormal returns sau ngày có tin POS/NEG/NEU
+python -m src.analysis.event_study_sentiment --horizons 1 3 5 10
 
-### Event study (abnormal returns around news events)
-
-```bash
-python -m src.analysis.event_study_sentiment --horizons 1 3 5 10 --threshold 0.0
-```
-
-### ML model comparison
-
-```bash
-# Rolling-window feature ML (Logistic, RF, GB)
+# ML model comparison (with vs without sentiment)
 python -m src.analysis.compare_ml_models
-
-# Granger-style restricted vs sentiment-augmented (regression + classification)
 python -m src.analysis.compare_granger_style_models
+
+# Analog forecasting: tìm ngày lịch sử tương đồng
+python -m src.analysis.analog_forecast --window 5 --top-k 15 --horizon 5
 ```
 
-### Visualization
-
-```bash
-python -m src.analysis.visualize_sentiment_price --tickers FPT VCB HPG --lag 1
-# → data/results/plots/FPT_sentiment_price_timeseries.png, ...
-```
-
-Tất cả script đều hỗ trợ `--news-days-only` để chỉ dùng ngày có tin tức.
+Flag `--news-days-only` có thể thêm vào hầu hết các script để chỉ dùng ngày có tin tức.
 
 ---
 
-## 13. Full pipeline
+## 13. Dashboard
 
 ```bash
-# Chạy toàn bộ pipeline backfill
-python -m src.jobs.run_full_pipeline \
-  --mode backfill \
-  --max-per-category 200 \
-  --timeline-pages 10 \
-  --reset-stage2
+streamlit run src/dashboard/app_sentiment_dashboard.py
+```
 
-# Kèm kiểm định thị trường
+### Các tab
+
+| Tab | Nội dung |
+|-----|----------|
+| 📊 Overview | Bảng sentiment tổng hợp theo mã / ngày |
+| 🔎 Ticker Detail | Sentiment + giá chi tiết theo mã |
+| 📈 Market | Biểu đồ market index, volatility |
+| 📰 News | Danh sách bài viết + sentiment |
+| 🧾 Explain Evidence | Giải thích aspect-level sentiment |
+| 🧪 Market Validation | Kiểm định tương quan tổng hợp |
+| 🛠 Data Quality | QA queries, phát hiện data issues |
+| 🔬 Research | Cross-corr, Granger, VAR, Event Study, Confusion Matrix, ML models |
+| 📡 Tín hiệu hôm nay | Analog forecasting: tìm ngày lịch sử tương đồng → dự báo chiều giá |
+
+### Tab "Tín hiệu hôm nay"
+
+Dựa trên dữ liệu từ 2024. Với mỗi mã VN30:
+1. Lấy vector đặc trưng 5 ngày gần nhất: `(log_return, volume_growth, sentiment_score)`
+2. Chuẩn hóa within-window (z-score) để tránh temporal proximity bias
+3. Tìm top-K ngày lịch sử có pattern gần nhất (Euclidean distance)
+4. Tính **win rate** (tỷ lệ ngày tương đồng → giá tăng sau H ngày)
+5. Hiển thị signal: 🟢 BULLISH / 🔴 BEARISH / ⚪ NEUTRAL
+
+---
+
+## 14. Full pipeline (one-shot)
+
+```bash
 python -m src.jobs.run_full_pipeline \
   --mode backfill \
   --max-per-category 3500 \
   --timeline-pages 100 \
   --reset-stage2 \
   --run-market-validation \
-  --market-start-date 2025-01-01 \
-  --market-tickers FPT,VCB,HPG,VIC,MBB,TCB
+  --market-start-date 2024-01-01
 ```
 
 ---
 
-## 14. Dashboard
+## 15. Model finetuning
 
 ```bash
-streamlit run src/dashboard/app_sentiment_dashboard.py
+# Chuẩn bị labels
+python -m src.label.prepare_labels --csv data/labels/raw_labels.csv
+
+# Finetune PhoBERT (last encoder layer + classifier head)
+python -m src.label.finetune \
+  --csv data/labels/context_labels.csv \
+  --epochs 15 --lr 1e-5
 ```
 
----
-
-## QA report
-
-```bash
-python -m src.jobs.qa_report
-```
-
-Ví dụ output:
-
-```text
-===== QA REPORT =====
-Tổng số bài: 300
-Số bài theo category:
-  doanh_nghiep              100
-  thi_truong_chung_khoan    100
-  ngan_hang                  80
-  bao_cao_phan_tich          20
-
-Số bài theo decision:
-  process_sentiment    160
-  review_later          60
-  skip_sentiment         80
-```
+Base model: `wonrax/phobert-base-vietnamese-sentiment`
+Input format: `[STOCK] {ticker} [/STOCK] [TEXT] {title}. {content} [/TEXT]`
 
 ---
 
 ## Ghi chú kỹ thuật
 
-- Crawler có retry, timeout, user-agent và delay (configurable qua `.env`).
-- Parser ưu tiên BeautifulSoup selector, fallback sang trafilatura nếu content < 300 ký tự.
+- Crawler: retry, timeout, configurable delay, user-agent rotation.
+- Parser: BeautifulSoup selector, fallback sang trafilatura nếu content < 300 ký tự.
 - Upsert theo URL — chạy lại không bị trùng bài.
-- Relevance filter: rule-based keyword + ticker scoring, không dùng LLM.
-- `crawl_backfill` dùng `--min-year` (default 2024) để dừng sớm khi gặp bài cũ.
-- `crawl_backfill --workers N` fetch N bài song song bằng `ThreadPoolExecutor`; flush DB sau mỗi 100 bài nên Ctrl+C không mất data.
-- `crawl_corporate_events` gán `detected_tickers` sẵn từ Events API, bỏ qua bước entity linking cho những mã đó.
-- Local inference dùng model HuggingFace từ thư mục local, không cần API server.
+- `crawl_backfill --workers N`: `ThreadPoolExecutor`, flush DB sau mỗi 100 bài.
+- `crawl_corporate_events`: gán `detected_tickers` từ Events API, bỏ qua entity linking.
+- vnstock rate limit: guest tier ~20 req/min → dùng `--delay-seconds 4`.
+- Subprocess output trong dashboard dùng `PYTHONIOENCODING=utf-8` để xử lý tiếng Việt trên Windows.
+
