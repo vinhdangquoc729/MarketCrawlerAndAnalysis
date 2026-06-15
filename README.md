@@ -36,8 +36,8 @@ src/
 ├── dashboard/         # Streamlit app
 ├── validation/        # QA queries
 └── label/             # PhoBERT finetuning scripts
-models/                # Finetuned PhoBERT checkpoints (không push git, gửi Drive)
-data/                  # Panel CSV, results (không push git)
+models/                # Finetuned PhoBERT checkpoints
+data/                  # Panel CSV, results
 docker-compose.yml     # PostgreSQL container
 requirements.txt
 .env.example
@@ -303,3 +303,4 @@ Input format: `[STOCK] {ticker} [/STOCK] [TEXT] {title}. {content} [/TEXT]`
 - vnstock rate limit: guest tier ~20 req/min → dùng `--delay-seconds 4`.
 - Subprocess output trong dashboard dùng `PYTHONIOENCODING=utf-8` để xử lý tiếng Việt trên Windows.
 
+Nguồn data và model sau khi đã fine-tune: https://drive.google.com/drive/folders/1CqV7UHSDvs4jAW4hwor6PqBEqYmK8Ry4?usp=sharing
