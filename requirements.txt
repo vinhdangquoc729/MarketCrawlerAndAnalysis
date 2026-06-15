@@ -21,3 +21,5 @@ transformers
 scipy
 statsmodels
 scikit-learn
+fastapi
+uvicorn[standard]
