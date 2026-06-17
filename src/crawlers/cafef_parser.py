@@ -25,36 +25,50 @@ from src.preprocessing.text_cleaner import clean_text
 SOURCE_NAME = "CafeF"
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
-# CafeF article URL usually ends with a long numeric article id, for example:
-# https://cafef.vn/tv2-phat-di-thong-bao-khan-sau-khi-chu-tich-bi-khoi-to-18826052120051431.chn
-#
-# Use 10+ digits instead of 12+ to avoid missing valid article URLs.
+
+# CafeF article URLs usually end with a long numeric article id.
+# Use 10+ digits to avoid missing valid article URLs.
 ARTICLE_URL_RE = re.compile(
     r"https?://cafef\.vn/.+-\d{10,}\.chn(?:\?.*)?$",
     re.IGNORECASE,
 )
 
+
+# Common date formats found in CafeF category pages, timeline API, and article pages.
 DATE_RE_LIST = [
-    # Timeline API usually returns ISO-like date:
-    # 2026-05-23T07:28:00
+    # Timeline API format, for example: 2026-05-23T07:28:00
     re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"),
 
     # Vietnamese display formats:
     # 24/05/2026 - 00:07
     # 24/05/2026 - 00:07 AM
-    re.compile(r"\d{1,2}/\d{1,2}/\d{4}\s*[-|]\s*\d{1,2}:\d{2}(?:\s*[AP]M)?", re.IGNORECASE),
+    re.compile(
+        r"\d{1,2}/\d{1,2}/\d{4}\s*[-|]\s*\d{1,2}:\d{2}(?:\s*[AP]M)?",
+        re.IGNORECASE,
+    ),
 
     # 24-05-2026 - 00:07
     # 24-05-2026 - 00:07 AM
-    re.compile(r"\d{1,2}-\d{1,2}-\d{4}\s*[-|]\s*\d{1,2}:\d{2}(?:\s*[AP]M)?", re.IGNORECASE),
+    re.compile(
+        r"\d{1,2}-\d{1,2}-\d{4}\s*[-|]\s*\d{1,2}:\d{2}(?:\s*[AP]M)?",
+        re.IGNORECASE,
+    ),
 
     # 24/05/2026 00:07
-    re.compile(r"\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}(?:\s*[AP]M)?", re.IGNORECASE),
+    re.compile(
+        r"\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}(?:\s*[AP]M)?",
+        re.IGNORECASE,
+    ),
 
     # 24-05-2026 00:07
-    re.compile(r"\d{1,2}-\d{1,2}-\d{4}\s+\d{1,2}:\d{2}(?:\s*[AP]M)?", re.IGNORECASE),
+    re.compile(
+        r"\d{1,2}-\d{1,2}-\d{4}\s+\d{1,2}:\d{2}(?:\s*[AP]M)?",
+        re.IGNORECASE,
+    ),
 ]
 
+
+# Markers that usually indicate the article body has ended.
 STOP_MARKERS = [
     "Từ Khóa:",
     "Từ Khóa",
@@ -69,6 +83,8 @@ STOP_MARKERS = [
     "Tin liên quan",
 ]
 
+
+# Standalone lines that are not useful article content.
 NOISE_TEXT_MARKERS = [
     "TIN MỚI",
     "Chia sẻ",
@@ -77,6 +93,8 @@ NOISE_TEXT_MARKERS = [
     "Link bài gốc",
 ]
 
+
+# Used to skip sponsored or advertisement-like blocks.
 SPONSORED_MARKERS = [
     "NỘI DUNG ĐƯỢC TÀI TRỢ",
     "Nội dung được tài trợ",
@@ -101,12 +119,13 @@ def parse_cafef_datetime(value: str | None) -> datetime | None:
     if not text:
         return None
 
+    # If the input contains extra text, extract only the date-like part first.
     extracted = _extract_date_from_text(text)
     if extracted:
         text = extracted.strip()
 
-    # 1. ISO format: YYYY-MM-DDTHH:MM:SS
-    # Không được replace dấu "-" trong ISO.
+    # 1. ISO format: YYYY-MM-DDTHH:MM:SS.
+    # Do not replace "-" here because it is part of the ISO format.
     iso_match = re.search(
         r"(?P<dt>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})",
         text,
@@ -120,7 +139,7 @@ def parse_cafef_datetime(value: str | None) -> datetime | None:
         except Exception:
             pass
 
-    # 2. Vietnamese format: DD-MM-YYYY - HH:MM hoặc DD/MM/YYYY - HH:MM
+    # 2. Vietnamese format: DD-MM-YYYY - HH:MM or DD/MM/YYYY - HH:MM.
     vn_match = re.search(
         r"(?P<day>\d{1,2})[/-](?P<month>\d{1,2})[/-](?P<year>\d{4})"
         r"\s*(?:-|\|)?\s*"
@@ -142,7 +161,6 @@ def parse_cafef_datetime(value: str | None) -> datetime | None:
             if ampm:
                 ampm = ampm.upper()
 
-                # CafeF có thể ghi 08:00 AM, 02:30 PM
                 if ampm == "PM" and hour < 12:
                     hour += 12
                 elif ampm == "AM" and hour == 12:
@@ -159,7 +177,7 @@ def parse_cafef_datetime(value: str | None) -> datetime | None:
         except Exception:
             pass
 
-    # 3. Fallback cuối cùng
+    # 3. Final fallback using dateutil parser.
     try:
         dt = date_parser.parse(
             text,
@@ -176,11 +194,12 @@ def parse_cafef_datetime(value: str | None) -> datetime | None:
     except Exception:
         return None
 
-def _drop_noise(soup: BeautifulSoup) -> None:
-    """Remove obvious non-content nodes.
 
-    Be careful not to remove .VCSortableInPreviewMode globally because CafeF
-    often uses it for images/tables inside the article body.
+def _drop_noise(soup: BeautifulSoup) -> None:
+    """Remove obvious non-content nodes from the parsed HTML.
+
+    Do not remove .VCSortableInPreviewMode globally because CafeF often uses it
+    for images or tables inside article content.
     """
     for tag in soup(["script", "style", "noscript", "iframe"]):
         tag.decompose()
@@ -207,12 +226,12 @@ def _drop_noise(soup: BeautifulSoup) -> None:
 
 
 def _is_article_url(url: str) -> bool:
-    """Return True if URL looks like a real CafeF article URL."""
+    """Return True if the URL looks like a real CafeF article URL."""
     return bool(ARTICLE_URL_RE.match(url))
 
 
 def _truncate_at_stop_markers(text: str) -> str:
-    """Cut article content before common CafeF non-body sections."""
+    """Cut article content before common non-body sections."""
     if not text:
         return ""
 
@@ -248,7 +267,7 @@ def _remove_noise_lines(text: str) -> str:
 
 
 def _extract_date_from_text(text: str) -> str | None:
-    """Extract date-like string from a text block."""
+    """Extract the first date-like string from a text block."""
     if not text:
         return None
 
@@ -261,9 +280,10 @@ def _extract_date_from_text(text: str) -> str | None:
 
 
 def _nearest_block_text(node: Tag) -> str:
-    """Get text from nearest parent block around a link.
+    """Get text from the nearest parent block around a link.
 
-    This helps extract title/sapo/time from CafeF category or timelinelist fragments.
+    This is useful for extracting title, sapo, or time from CafeF category pages
+    and timeline HTML fragments.
     """
     current: Tag | None = node
 
@@ -282,43 +302,40 @@ def _nearest_block_text(node: Tag) -> str:
 
 
 def _link_published_at(a: Tag) -> "datetime | None":
-    """Find published_at for a link by inspecting the enclosing article block.
+    """Find published_at for a link by inspecting its enclosing article block.
 
-    The timeline HTML structure is:
-      <div role="article" class="tlitem ...">
-        <h3><a href="...">Title</a></h3>           ← a is here
-        <div class="tlitem-flex">
-          <span class="time time-ago" title="2026-06-07T00:01:00">...</span>
-        </div>
-      </div>
-
-    _nearest_block_text returns from the <a> itself (title text ≥20 chars),
-    so it never sees the sibling <span class="time">. This function walks up to
-    the article container and looks for the time span explicitly.
+    The timeline HTML usually stores the real timestamp in a sibling
+    <span class="time"> or <time> tag, not inside the <a> itself.
     """
     current: Tag | None = a
+
     for _ in range(8):
         if current is None:
             break
-        # CafeF article containers: role=article, or classes like tlitem / box-category-item
+
         if current.name in ("div", "li", "article") and current is not a:
             role = current.get("role", "")
             cls = " ".join(current.get("class") or [])
+
             if role == "article" or any(
-                k in cls for k in ("tlitem", "box-category-item", "knswli", "list-news-item")
+                k in cls
+                for k in ("tlitem", "box-category-item", "knswli", "list-news-item")
             ):
                 for span in current.find_all(["span", "time"], recursive=True):
-                    # Try title attribute first (most reliable on timeline pages)
+                    # The title attribute is usually the most reliable on timeline pages.
                     title_val = span.get("title") or ""
                     text_val = clean_text(span.get_text(" "))
+
                     for val in (title_val, text_val):
                         if val:
                             dt = parse_cafef_datetime(val)
                             if dt:
                                 return dt
                 break
+
         parent = current.parent
         current = parent if isinstance(parent, Tag) else None
+
     return None
 
 
@@ -330,7 +347,7 @@ def parse_article_links(html: str, base_url: str) -> list[dict]:
             {
                 "url": "...",
                 "title": "...",
-                "published_at": "... or None",
+                "published_at": datetime | None,
             }
         ]
     """
@@ -360,29 +377,28 @@ def parse_article_links(html: str, base_url: str) -> list[dict]:
         title = clean_text(a.get("title") or a.get_text(" "))
         block_text = _nearest_block_text(a)
 
-        # Sometimes the anchor contains only an image or empty text.
-        # In that case, try to infer title from nearby block text.
+        # Some anchors only contain an image or empty text.
+        # In that case, infer title from the surrounding block text.
         if not title or len(title) < 12:
             title = block_text
 
         title = clean_text(title)
 
-        # Avoid extremely long block text becoming title.
+        # Prevent very long block text from being used as the title.
         if len(title) > 260:
-            # Prefer the first reasonable sentence-like chunk.
             parts = re.split(r"\s{2,}|(?<=\.)\s+", title)
             title = clean_text(parts[0]) if parts else title
 
         if not title or len(title) < 12:
             continue
 
-        # Skip sponsored blocks if marker appears very close to this link.
-        # Do not over-skip globally because some valid enterprise news may appear after ads.
+        # Skip sponsored blocks near this link.
         block_text_lower = block_text.lower()
         if any(marker.lower() in block_text_lower for marker in SPONSORED_MARKERS):
             continue
 
         published_at = _link_published_at(a)
+
         if published_at is None:
             published_text = _extract_date_from_text(block_text)
             published_at = parse_cafef_datetime(published_text) if published_text else None
@@ -400,7 +416,7 @@ def parse_article_links(html: str, base_url: str) -> list[dict]:
 
 
 def _first_text(soup: BeautifulSoup, selectors: list[str]) -> str:
-    """Return first non-empty text from selectors."""
+    """Return the first non-empty text matched by the given selectors."""
     for selector in selectors:
         node = soup.select_one(selector)
 
@@ -413,7 +429,7 @@ def _first_text(soup: BeautifulSoup, selectors: list[str]) -> str:
 
 
 def _meta_content(soup: BeautifulSoup, *names: str) -> str:
-    """Read meta property/name content."""
+    """Read content from meta property/name tags."""
     for name in names:
         node = soup.find("meta", attrs={"property": name}) or soup.find(
             "meta",
@@ -427,7 +443,7 @@ def _meta_content(soup: BeautifulSoup, *names: str) -> str:
 
 
 def _extract_content_by_selectors(soup: BeautifulSoup) -> str:
-    """Extract article body using common CafeF selectors."""
+    """Extract article body using common CafeF content selectors."""
     selectors = [
         ".detail-content",
         ".article-content",
@@ -447,6 +463,7 @@ def _extract_content_by_selectors(soup: BeautifulSoup) -> str:
         if not node:
             continue
 
+        # Remove nested non-content nodes inside the article body.
         for bad in node.select(
             "script, style, iframe, .ads, .advertisement, .share, .related, .tinlienquan"
         ):
@@ -484,15 +501,16 @@ def _extract_content_fallback(html: str) -> str:
 
     return content
 
+
 def _extract_header_published_text(soup: BeautifulSoup) -> str | None:
-    """Extract CafeF published time from the article header/byline area.
+    """Extract CafeF published time from the article header or byline area.
 
     Example header:
     Ánh Dương | 12-05-2026 - 08:00 AM | Doanh nghiệp
     """
     candidates: list[str] = []
 
-    # Ưu tiên các block gần h1 vì CafeF để ngày đăng gần tiêu đề.
+    # Prefer blocks near h1 because CafeF usually places the date near the title.
     title_node = soup.select_one("h1")
 
     if title_node:
@@ -509,7 +527,7 @@ def _extract_header_published_text(soup: BeautifulSoup) -> str | None:
             parent = current.parent
             current = parent if isinstance(parent, Tag) else None
 
-    # Thêm các selector thường chứa thời gian ở đầu bài
+    # Common selectors that may contain the article published time.
     for selector in [
         ".knc-time",
         ".time",
@@ -531,8 +549,9 @@ def _extract_header_published_text(soup: BeautifulSoup) -> str | None:
 
     return None
 
+
 def _extract_published_at(soup: BeautifulSoup) -> datetime | None:
-    """Extract article published time from meta/time/header/selectors."""
+    """Extract article published time from meta, time tag, header, or selectors."""
     meta_time = _meta_content(
         soup,
         "article:published_time",
@@ -545,12 +564,13 @@ def _extract_published_at(soup: BeautifulSoup) -> datetime | None:
         return parse_cafef_datetime(meta_time)
 
     time_node = soup.find("time")
+
     if time_node:
         dt_value = time_node.get("datetime") or clean_text(time_node.get_text(" "))
         if dt_value:
             return parse_cafef_datetime(dt_value)
 
-    # Quan trọng: lấy ngày ở đầu bài trước.
+    # Header date is preferred before scanning the whole page.
     header_date_text = _extract_header_published_text(soup)
     if header_date_text:
         return parse_cafef_datetime(header_date_text)
@@ -571,8 +591,8 @@ def _extract_published_at(soup: BeautifulSoup) -> datetime | None:
     if published_text:
         return parse_cafef_datetime(published_text)
 
-    # Fallback cuối: chỉ scan phần trước "Link bài gốc" và "CÙNG CHUYÊN MỤC"
-    # để tránh bắt nhầm ngày của nguồn gốc hoặc bài liên quan.
+    # Last fallback: scan only the main page text before related/source sections
+    # to reduce the chance of picking dates from related articles.
     page_text = clean_text(soup.get_text(" "))
 
     for marker in [
@@ -589,7 +609,6 @@ def _extract_published_at(soup: BeautifulSoup) -> datetime | None:
     date_text = _extract_date_from_text(page_text)
 
     return parse_cafef_datetime(date_text) if date_text else None
-   
 
 
 def parse_article_detail(html: str, url: str, category: str) -> dict:
@@ -624,6 +643,7 @@ def parse_article_detail(html: str, url: str, category: str) -> dict:
 
     content = _extract_content_by_selectors(soup)
 
+    # Use trafilatura only when selector-based extraction is too short.
     if len(content) < 300:
         content = _extract_content_fallback(html)
 
