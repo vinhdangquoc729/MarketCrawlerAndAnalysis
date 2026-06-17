@@ -20,11 +20,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class CafeFCategory:
-    """CafeF category config.
-
-    timeline_id is the internal CafeF ID used by the "Xem thêm" API:
-    https://cafef.vn/timelinelist/{timeline_id}/{page}.chn
-    """
+    """Cấu hình cho từng chuyên mục CafeF."""
 
     name: str
     url: str
@@ -32,7 +28,7 @@ class CafeFCategory:
 
 
 class CafeFCrawler:
-    """Crawler for selected CafeF categories."""
+    """Crawler dùng để thu thập bài viết từ các chuyên mục CafeF."""
 
     CATEGORIES: dict[str, CafeFCategory] = {
         "thi_truong_chung_khoan": CafeFCategory(
@@ -57,7 +53,7 @@ class CafeFCrawler:
         ),
     }
 
-    # Backward-compatible mapping for older jobs
+    # Giữ lại mapping cũ để các job trước đó vẫn dùng được.
     CATEGORY_URLS: dict[str, str] = {
         name: category.url for name, category in CATEGORIES.items()
     }
@@ -97,11 +93,11 @@ class CafeFCrawler:
 
     @staticmethod
     def build_timeline_url(timeline_id: int, page: int) -> str:
-        """Build CafeF timeline/load-more URL."""
+        """Tạo URL API timeline/load-more của CafeF."""
         return f"https://cafef.vn/timelinelist/{timeline_id}/{page}.chn"
 
     def fetch_html(self, url: str, retries: int = 3) -> str:
-        """Fetch HTML with retry and polite delay."""
+        """Fetch HTML với retry để hạn chế lỗi mạng tạm thời."""
         last_error: Exception | None = None
 
         for attempt in range(1, retries + 1):
@@ -111,6 +107,7 @@ class CafeFCrawler:
                 resp = self.session.get(url, timeout=self.timeout_seconds)
                 resp.raise_for_status()
 
+                # Set encoding để đọc tiếng Việt ổn định hơn.
                 resp.encoding = resp.apparent_encoding or "utf-8"
                 return resp.text
 
@@ -122,6 +119,8 @@ class CafeFCrawler:
                     url,
                     exc,
                 )
+
+                # Backoff nhẹ giữa các lần retry.
                 time.sleep(min(2 * attempt, 5))
 
         raise RuntimeError(f"Failed to fetch {url}: {last_error}")
@@ -131,7 +130,7 @@ class CafeFCrawler:
         category_name: str,
         category_url: str | None = None,
     ) -> CafeFCategory:
-        """Resolve category config and keep backward compatibility."""
+        """Lấy cấu hình chuyên mục, đồng thời hỗ trợ truyền URL ngoài."""
         if category_name not in self.CATEGORIES:
             if not category_url:
                 raise ValueError(
@@ -167,15 +166,7 @@ class CafeFCrawler:
         max_empty_pages: int = 3,
         min_year: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Crawl article links from category page and CafeF timelinelist pages.
-
-        Flow:
-        1. Fetch the category HTML.
-        2. Parse article links already present.
-        3. If timeline_id exists, call /timelinelist/{timeline_id}/{page}.chn.
-        4. Deduplicate links.
-        5. Stop timeline only after several consecutive pages add no new links.
-        """
+        """Crawl danh sách link bài viết từ trang chuyên mục và timeline."""
         category = self._resolve_category(
             category_name=category_name,
             category_url=category_url,
@@ -184,7 +175,7 @@ class CafeFCrawler:
         all_links: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
 
-        # 1. Crawl initial category page
+        # Crawl link có sẵn trên trang chuyên mục.
         html = self.fetch_html(category.url)
         initial_links = parse_article_links(html, category.url)
 
@@ -219,11 +210,11 @@ class CafeFCrawler:
         if stop_from_initial:
             logger.info(
                 "Stopped at initial page due to min_year=%s category=%s",
-                min_year, category_name,
+                min_year,
+                category_name,
             )
             return all_links
 
-        # 2. Crawl timeline/load-more API
         if not use_timeline:
             return all_links
 
@@ -237,6 +228,7 @@ class CafeFCrawler:
 
         empty_pages = 0
 
+        # Crawl thêm các trang timeline.
         for page in range(
             timeline_start_page,
             timeline_start_page + timeline_max_pages,
@@ -320,7 +312,9 @@ class CafeFCrawler:
             if stop_early:
                 logger.info(
                     "Stopping timeline due to min_year=%s category=%s page=%s",
-                    min_year, category_name, page,
+                    min_year,
+                    category_name,
+                    page,
                 )
                 break
 
@@ -330,6 +324,7 @@ class CafeFCrawler:
                 if item.get("published_at")
             ]
             oldest = min(dates).strftime("%Y-%m-%d") if dates else "unknown"
+
             logger.info(
                 "Timeline category=%s timeline_id=%s page=%s found=%s added=%s total=%s oldest=%s",
                 category_name,
@@ -370,21 +365,7 @@ class CafeFCrawler:
         batch_size: int = 100,
         workers: int = 10,
     ) -> list[dict[str, Any]]:
-        """Crawl article links and details for one category.
-
-        Backward-compatible:
-        - Old style still works:
-          crawl_category("doanh_nghiep", "https://cafef.vn/doanh-nghiep.chn", 200)
-
-        New style:
-        - crawl_category(
-              category_name="doanh_nghiep",
-              max_articles=200,
-              use_timeline=True,
-              timeline_start_page=1,
-              timeline_max_pages=10,
-          )
-        """
+        """Crawl link và nội dung chi tiết bài viết của một chuyên mục."""
         links = self.crawl_category_links(
             category_name=category_name,
             category_url=category_url,
@@ -397,22 +378,31 @@ class CafeFCrawler:
 
         logger.info(
             "Found %s links for category=%s — crawling with workers=%s",
-            len(links), category_name, workers,
+            len(links),
+            category_name,
+            workers,
         )
 
         articles: list[dict[str, Any]] = []
         done = 0
 
         def _fetch_one(item: dict) -> dict[str, Any]:
+            """Crawl chi tiết một bài viết, nếu lỗi thì trả về record fallback."""
             try:
                 article = self.crawl_article(item["url"], category_name)
+
+                # Dùng published_at từ trang danh sách nếu trang chi tiết không parse được.
                 if not article.get("published_at") and item.get("published_at"):
                     article["published_at"] = item["published_at"]
+
                 if not is_valid_article(article):
                     article["error_message"] = "invalid_or_short_article"
+
                 return article
+
             except Exception as exc:
                 logger.warning("Article crawl failed url=%s: %s", item["url"], exc)
+
                 return {
                     "source": "CafeF",
                     "url": item["url"],
@@ -426,8 +416,10 @@ class CafeFCrawler:
                     "error_message": str(exc),
                 }
 
+        # Dùng thread vì crawl bài viết là tác vụ I/O-bound.
         with ThreadPoolExecutor(max_workers=workers) as pool:
             future_to_item = {pool.submit(_fetch_one, item): item for item in links}
+
             for future in as_completed(future_to_item):
                 article = future.result()
                 articles.append(article)
@@ -435,9 +427,13 @@ class CafeFCrawler:
 
                 pub = article.get("published_at")
                 pub_str = pub.strftime("%Y-%m-%d") if pub else "unknown"
+
                 logger.info(
                     "Crawled article %s/%s category=%s date=%s title=%s",
-                    done, len(links), category_name, pub_str,
+                    done,
+                    len(links),
+                    category_name,
+                    pub_str,
                     str(article.get("title", ""))[:100],
                 )
 
@@ -445,13 +441,15 @@ class CafeFCrawler:
                     on_batch(articles[-batch_size:])
                     logger.info(
                         "Flushed batch of %s articles category=%s total=%s",
-                        batch_size, category_name, done,
+                        batch_size,
+                        category_name,
+                        done,
                     )
 
         return articles
 
     def crawl_article(self, url: str, category_name: str) -> dict[str, Any]:
-        """Crawl and parse a single article."""
+        """Crawl và parse một bài viết CafeF."""
         html = self.fetch_html(url)
         return parse_article_detail(html, url=url, category=category_name)
 
@@ -466,7 +464,7 @@ class CafeFCrawler:
         batch_size: int = 100,
         workers: int = 10,
     ) -> list[dict[str, Any]]:
-        """Crawl all configured priority categories."""
+        """Crawl toàn bộ các chuyên mục đã cấu hình."""
         all_articles: list[dict[str, Any]] = []
 
         for name, category in self.CATEGORIES.items():
