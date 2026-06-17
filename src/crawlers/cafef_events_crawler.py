@@ -30,19 +30,21 @@ EVENTS_URL = (
     "https://cafef.vn/du-lieu/Ajax/Events_RelatedNews_New.aspx"
     "?symbol={symbol}&floorID=0&configID=0&PageIndex={page}&PageSize=30&Type=2"
 )
+
 BASE_URL = "https://cafef.vn"
 CATEGORY = "corporate_events"
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 class CafeFEventsCrawler:
-    """Crawl ticker-specific corporate event articles from CafeF."""
+    """Crawler for ticker-specific corporate event articles from CafeF."""
 
     def __init__(
         self,
         delay_seconds: float | None = None,
         timeout_seconds: int | None = None,
     ) -> None:
+        # Use env config if arguments are not provided.
         self.delay_seconds = (
             delay_seconds
             if delay_seconds is not None
@@ -54,6 +56,7 @@ class CafeFEventsCrawler:
             else int(os.getenv("CRAWL_TIMEOUT_SECONDS", "15"))
         )
 
+        # Reuse session connections and set browser-like headers.
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": (
@@ -67,22 +70,31 @@ class CafeFEventsCrawler:
         })
 
     def _fetch(self, url: str, retries: int = 3) -> str:
+        """Fetch HTML content with retry and simple backoff."""
         last_exc: Exception | None = None
+
         for attempt in range(1, retries + 1):
             try:
                 time.sleep(self.delay_seconds)
+
                 resp = self.session.get(url, timeout=self.timeout_seconds)
                 resp.raise_for_status()
+
+                # Ensure Vietnamese text is decoded correctly.
                 resp.encoding = resp.apparent_encoding or "utf-8"
                 return resp.text
+
             except Exception as exc:
                 last_exc = exc
                 logger.warning("Fetch attempt=%s url=%s error=%s", attempt, url, exc)
+
+                # Wait a little longer after each failed attempt.
                 time.sleep(min(2 * attempt, 5))
+
         raise RuntimeError(f"Failed to fetch {url}: {last_exc}")
 
     def _parse_event_list(self, html: str, ticker: str) -> list[dict]:
-        """Parse the <ul> HTML returned by the Events API."""
+        """Parse event links from CafeF Events API response."""
         soup = BeautifulSoup(html, "lxml")
         events = []
 
@@ -93,6 +105,7 @@ class CafeFEventsCrawler:
 
             href = a_tag.get("href", "")
             url = BASE_URL + href.split("?")[0] if href.startswith("/") else href
+
             if not url or "cafef.vn" not in url:
                 continue
 
@@ -124,13 +137,19 @@ class CafeFEventsCrawler:
 
         for page in range(1, max_pages + 1):
             url = EVENTS_URL.format(
-                symbol=ticker.upper(), page=page, size=page_size
+                symbol=ticker.upper(),
+                page=page,
+                size=page_size,
             )
+
             try:
                 html = self._fetch(url)
             except Exception as exc:
                 logger.warning(
-                    "Events API failed ticker=%s page=%s: %s", ticker, page, exc
+                    "Events API failed ticker=%s page=%s: %s",
+                    ticker,
+                    page,
+                    exc,
                 )
                 break
 
@@ -138,7 +157,9 @@ class CafeFEventsCrawler:
 
             if not events:
                 logger.info(
-                    "No events returned ticker=%s page=%s — stopping.", ticker, page
+                    "No events returned ticker=%s page=%s — stopping.",
+                    ticker,
+                    page,
                 )
                 break
 
@@ -149,6 +170,7 @@ class CafeFEventsCrawler:
                 if ev["url"] in seen:
                     continue
 
+                # Stop when older data is reached.
                 if min_year and ev["published_at"]:
                     year = ev["published_at"].year
                     if year < min_year:
@@ -161,7 +183,11 @@ class CafeFEventsCrawler:
 
             logger.info(
                 "Events API ticker=%s page=%s found=%s added=%s total=%s",
-                ticker, page, len(events), added, len(all_events),
+                ticker,
+                page,
+                len(events),
+                added,
+                len(all_events),
             )
 
             if stop_early or len(events) < page_size:
@@ -175,14 +201,13 @@ class CafeFEventsCrawler:
         max_pages: int = 10,
         min_year: int | None = None,
     ) -> list[dict]:
-        """Fetch event links then enrich each with full article content.
-
-        Returns article dicts ready for bulk_upsert_articles, with
-        detected_tickers pre-populated from the Events API.
-        """
+        """Fetch event links and enrich each event with full article content."""
         links = self.fetch_event_links(
-            ticker=ticker, max_pages=max_pages, min_year=min_year
+            ticker=ticker,
+            max_pages=max_pages,
+            min_year=min_year,
         )
+
         logger.info("Fetched event links ticker=%s count=%s", ticker, len(links))
 
         articles: list[dict] = []
@@ -190,11 +215,15 @@ class CafeFEventsCrawler:
 
         for idx, link in enumerate(links, start=1):
             url = link["url"]
+
             try:
                 html = self._fetch(url)
                 parsed = parse_article_detail(html, url=url, category=CATEGORY)
+
             except Exception as exc:
                 logger.warning("Article fetch failed url=%s: %s", url, exc)
+
+                # Fallback record keeps the article URL and event metadata.
                 parsed = {
                     "source": "CafeF",
                     "url": url,
@@ -208,8 +237,8 @@ class CafeFEventsCrawler:
                 }
 
             published_at = parsed.get("published_at") or link.get("published_at")
-            # API title is always the actual event title; parsed HTML title for
-            # /du-lieu/ URLs returns the company profile page name, not the event.
+
+            # For /du-lieu/ URLs, the API title is more accurate than parsed page title.
             title = link.get("title") or parsed.get("title") or ""
             content = parsed.get("content") or ""
 
@@ -230,7 +259,10 @@ class CafeFEventsCrawler:
 
             logger.info(
                 "Crawled event article %s/%s ticker=%s title=%s",
-                idx, len(links), ticker, title[:80],
+                idx,
+                len(links),
+                ticker,
+                title[:80],
             )
 
             articles.append(article)
@@ -243,25 +275,33 @@ class CafeFEventsCrawler:
         max_pages: int = 10,
         min_year: int | None = None,
     ) -> list[dict]:
-        """Crawl corporate events for a list of tickers."""
+        """Crawl corporate event articles for multiple tickers."""
         all_articles: list[dict] = []
 
         for idx, ticker in enumerate(tickers, start=1):
             logger.info(
                 "Crawling corporate events ticker=%s (%s/%s)",
-                ticker, idx, len(tickers),
+                ticker,
+                idx,
+                len(tickers),
             )
+
             try:
                 articles = self.crawl_ticker(
                     ticker=ticker,
                     max_pages=max_pages,
                     min_year=min_year,
                 )
+
                 all_articles.extend(articles)
+
                 logger.info(
                     "Done ticker=%s articles=%s total_so_far=%s",
-                    ticker, len(articles), len(all_articles),
+                    ticker,
+                    len(articles),
+                    len(all_articles),
                 )
+
             except Exception:
                 logger.exception("Failed to crawl ticker=%s", ticker)
 
